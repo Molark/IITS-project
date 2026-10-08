@@ -1,5 +1,5 @@
 # IITS-project
-Мы выбрали контур Логистики, [документация](./docs/01-system-charter.md), [capability](./docs/02-capability-passport.md)
+Мы выбрали контур Логистики, [документация](./docs/01-system-charter.md), [capability](./docs/02-capability-passport.md), [experience pack](./docs/03-experience-pack.md)
 
 ## Команда и Роли 
  - Botalov Egor - Архитектор приложений и интеграций
