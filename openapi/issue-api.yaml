@@ -1,0 +1,289 @@
+openapi: 3.0.3
+info:
+  title: API выдачи ПВЗ (АРМ оператора → Сервис выдачи)
+  version: 1.0.0
+  description: |
+    API экрана выдачи. Сервис выдачи ведёт сагу выдачи с оплатой (ADR-005).
+    Все POST идут с заголовком Idempotency-Key: повтор с тем же ключом не создаёт
+    вторую выдачу или оплату. Ошибки в формате application/problem+json.
+    Таймаут АРМ 2,5 с, до 3 повторов с тем же ключом. Правила версий — docs/07-integrations.md.
+  contact:
+    name: Команда «Выдача»
+servers:
+  - url: https://pvz.example.local/api
+    description: Учебный адрес
+tags:
+  - name: orders
+    description: Карточка заказа на экране выдачи
+  - name: payment
+    description: Оплата при получении (шаг саги)
+  - name: issues
+    description: Фиксация выдачи
+
+paths:
+  /v1/orders/{orderId}:
+    get:
+      tags: [orders]
+      operationId: getIssueCard
+      summary: Карточка заказа для выдачи
+      description: Показывает, можно ли выдать заказ (FR-01) и статус оплаты (FR-02).
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/PointIdQuery'
+      responses:
+        '200':
+          description: Карточка заказа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueCard' }
+              example:
+                order_id: '4821-77'
+                point_id: MDM-0451
+                cell: B-14
+                recipient_phone_masked: '+7 *** ***-12-34'
+                cod_amount_kopecks: 249000
+                payment_type: cod
+                payment:
+                  payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11
+                  status: unknown
+                can_issue: false
+                block_reason: payment_unknown
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /v1/orders/{orderId}/payment:
+    post:
+      tags: [payment]
+      operationId: startPayment
+      summary: Запустить оплату при получении
+      description: |
+        Шаг 2 саги. Сервис выдачи вызывает Адаптер оплаты
+        (openapi/payment-adapter-api.yaml) и возвращает один из трёх исходов:
+        `paid`, `declined`, `unknown`. Ответ — не дольше 2 с в 95% случаев (NFR-01).
+        Если есть оплата этого заказа со статусом `unknown`, новая оплата
+        не запускается — ответ 409 (FR-05).
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartPaymentRequest' }
+            example:
+              point_id: MDM-0451
+              operator_id: op-1093
+              terminal_id: T-0451-1
+      responses:
+        '200':
+          description: Исход известен или не определён (три исхода)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResult' }
+              examples:
+                paid:
+                  value: { payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11, status: paid }
+                unknown:
+                  value: { payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11, status: unknown, retry_after_seconds: 5 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Предыдущая оплата заказа не определена или заказ уже выдан
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              example:
+                type: https://pvz.example.local/errors/payment-unknown
+                title: Предыдущая оплата не определена
+                status: 409
+                code: PAYMENT_UNKNOWN
+                detail: Дождитесь статуса оплаты 6f1c2a52 или передайте разбор старшему смены
+        '422': { $ref: '#/components/responses/Validation' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+    get:
+      tags: [payment]
+      operationId: getPaymentStatus
+      summary: Текущий статус оплаты заказа
+      description: |
+        Экран «Платёж не определён» опрашивает этот метод раз в 5 с.
+        Сервис выдачи сам узнаёт статус в банке по ID операции (Spike: до 60 с).
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Статус оплаты
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/issues:
+    post:
+      tags: [issues]
+      operationId: confirmIssue
+      summary: Зафиксировать выдачу
+      description: |
+        Шаг 5 саги, после точки невозврата. `issue_id` создаёт АРМ (FR-03)
+        и он же передаётся как `Idempotency-Key`. Для предоплаченных заказов
+        запрос может прийти позже, после офлайна (FR-04): `occurred_at` — время
+        факта на точке. Выдача и событие `OrderIssued` записываются в одной
+        транзакции (Outbox).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Issue' }
+            example:
+              issue_id: 0b9d8b0e-3f4c-4a39-9a51-7e2b6f1a9c02
+              order_id: '4821-77'
+              point_id: MDM-0451
+              operator_id: op-1093
+              payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11
+              occurred_at: '2026-10-22T14:03:00+03:00'
+              offline: false
+      responses:
+        '201':
+          description: Выдача зафиксирована
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueAccepted' }
+        '200':
+          description: Повтор с тем же ключом — выдача уже была зафиксирована, новая не создана (NFR-04)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueAccepted' }
+        '409':
+          description: Заказ уже выдан с другим issue_id или отменён (DQ-02). Создаётся инцидент.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Нет обязательных полей (DQ-01) или оплата НП не подтверждена (FR-01, DQ-05)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+components:
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, example: '4821-77' }
+    PointIdQuery:
+      name: point_id
+      in: query
+      required: true
+      schema: { type: string, example: MDM-0451 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Один ключ на одну операцию. Повтор — с тем же ключом.
+      schema: { type: string, format: uuid }
+
+  responses:
+    NotFound:
+      description: Заказ не найден на этой точке
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Validation:
+      description: Ошибка в данных запроса
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: Сервис временно недоступен, повторите с тем же Idempotency-Key
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Через сколько секунд повторить
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    PaymentStatus:
+      type: string
+      description: Три исхода оплаты. Потребитель обязан обработать незнакомое значение как `unknown`.
+      enum: [paid, declined, unknown]
+
+    IssueCard:
+      type: object
+      required: [order_id, point_id, payment_type, can_issue]
+      properties:
+        order_id: { type: string }
+        point_id: { type: string }
+        cell: { type: string }
+        recipient_phone_masked:
+          type: string
+          description: Только маска, полный телефон не передаётся (ПДн)
+        cod_amount_kopecks:
+          type: integer
+          minimum: 0
+          description: Сумма НП в копейках; 0 для предоплаты
+        payment_type: { type: string, enum: [prepaid, cod] }
+        payment:
+          $ref: '#/components/schemas/PaymentResult'
+        can_issue: { type: boolean }
+        block_reason:
+          type: string
+          enum: [recipient_not_verified, payment_required, payment_unknown, payment_declined, already_issued, offline_cod_forbidden]
+
+    StartPaymentRequest:
+      type: object
+      required: [point_id, operator_id, terminal_id]
+      properties:
+        point_id: { type: string }
+        operator_id: { type: string }
+        terminal_id: { type: string }
+
+    PaymentResult:
+      type: object
+      required: [payment_id, status]
+      properties:
+        payment_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/PaymentStatus' }
+        retry_after_seconds:
+          type: integer
+          description: Для `unknown` — через сколько спросить статус снова
+
+    Issue:
+      type: object
+      required: [issue_id, order_id, point_id, operator_id, occurred_at]
+      properties:
+        issue_id: { type: string, format: uuid, description: Создаёт АРМ (FR-03) }
+        order_id: { type: string }
+        point_id: { type: string }
+        operator_id: { type: string }
+        payment_id:
+          type: string
+          format: uuid
+          description: Обязателен для заказов с НП (DQ-01)
+        occurred_at: { type: string, format: date-time, description: Время факта выдачи на точке }
+        offline: { type: boolean, default: false }
+
+    IssueAccepted:
+      type: object
+      required: [issue_id, order_id, status]
+      properties:
+        issue_id: { type: string, format: uuid }
+        order_id: { type: string }
+        status: { type: string, enum: [issued] }
+
+    Problem:
+      type: object
+      description: Единый формат ошибки (RFC 7807) + свой машинный код
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum: [VALIDATION_ERROR, NOT_FOUND, ALREADY_ISSUED, ORDER_CANCELLED, PAYMENT_REQUIRED, PAYMENT_UNKNOWN, PAYMENT_DECLINED, IDEMPOTENCY_KEY_REUSED, SERVICE_UNAVAILABLE]
+        detail: { type: string }
+        correlation_id: { type: string, description: Для поиска в логах (Модуль 3) }
