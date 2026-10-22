@@ -1,0 +1,103 @@
+asyncapi: 3.0.0
+info:
+  title: События контекста «Выдача»
+  version: 1.0.0
+  description: |
+    Публикует Сервис выдачи. Читают Партнёры, Сверка, Приёмка и хранилище.
+    Событие отправляется через outbox и может прийти дважды: потребитель отсеивает повторы по event_id.
+    Ключ Kafka — order_id. Мажорная версия в адресе канала. ПДн в событие не кладём.
+defaultContentType: application/json
+servers:
+  kafka:
+    host: kafka.pvz.example.local:9092
+    protocol: kafka
+    description: Учебный кластер Kafka (ADR-003)
+channels:
+  orderIssued:
+    address: pvz.issue.order-issued.v1
+    description: Факт выдачи заказа получателю
+    messages:
+      OrderIssued:
+        $ref: '#/components/messages/OrderIssued'
+operations:
+  publishOrderIssued:
+    action: send
+    summary: Публикует Сервис выдачи (через outbox БД выдачи)
+    channel:
+      $ref: '#/channels/orderIssued'
+    messages:
+      - $ref: '#/channels/orderIssued/messages/OrderIssued'
+components:
+  messages:
+    OrderIssued:
+      name: OrderIssued
+      title: Заказ выдан
+      headers:
+        $ref: '#/components/schemas/Headers'
+      payload:
+        $ref: '#/components/schemas/OrderIssuedPayload'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: order_id
+      examples:
+        - name: example
+          headers:
+            correlation_id: 0d7f4b1e-21a3-4c3d-9a5e-11c0b2b7f001
+          payload:
+            event_id: 9a7c1e4f-5d2b-4f0a-8c3e-2b1d6e9f0a11
+            event_type: OrderIssued
+            event_version: 1
+            occurred_at: '2026-10-22T14:03:00+03:00'
+            order_id: '4821-77'
+            issue_id: 0b9d8b0e-3f4c-4a39-9a51-7e2b6f1a9c02
+            point_id: MDM-0451
+            operator_id: op-1093
+            partner_id: wb
+            payment_type: cod
+            payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11
+            cod_amount_kopecks: 249000
+            issued_offline: false
+  schemas:
+    Headers:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+          description: Один на всю цепочку выдачи, для трассировки (Модуль 3)
+    OrderIssuedPayload:
+      type: object
+      required: [event_id, event_type, event_version, occurred_at, order_id, issue_id, point_id, operator_id, payment_type]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Уникален для события. По нему потребитель отсекает дубли
+        event_type:
+          type: string
+          const: OrderIssued
+        event_version:
+          type: integer
+          const: 1
+        occurred_at:
+          type: string
+          format: date-time
+          description: Время факта (не публикации). При офлайне — время на точке
+        order_id:
+          type: string
+          description: Ключ партиции, порядок событий одного заказа
+        issue_id:
+          type: string
+          format: uuid
+          description: ID выдачи, создан АРМ (FR-03)
+        point_id: { type: string }
+        operator_id: { type: string }
+        partner_id: { type: string, description: Маркетплейс }
+        payment_type: { type: string, enum: [prepaid, cod] }
+        payment_id:
+          type: string
+          format: uuid
+          description: Обязателен для cod (DQ-01)
+        cod_amount_kopecks: { type: integer, minimum: 0 }
+        issued_offline: { type: boolean, description: "Выдача без связи (только prepaid, NFR-02)" }
