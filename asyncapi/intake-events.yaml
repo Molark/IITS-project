@@ -1,0 +1,87 @@
+asyncapi: 3.0.0
+info:
+  title: События контекста «Приёмка и хранение»
+  version: 1.0.0
+  description: |
+    Публикует Сервис приёмки, когда заказ разложен в ячейку. Читают Выдача, Уведомления и хранилище.
+    Событие отправляется через outbox и может прийти дважды: потребитель отсеивает повторы по event_id.
+    Ключ Kafka — order_id. Мажорная версия в адресе канала. ПДн в событие не кладём.
+defaultContentType: application/json
+servers:
+  kafka:
+    host: kafka.pvz.example.local:9092
+    protocol: kafka
+    description: Учебный кластер Kafka (ADR-003)
+channels:
+  orderPlaced:
+    address: pvz.intake.order-placed.v1
+    description: Заказ размещён в ячейке точки
+    messages:
+      OrderPlaced:
+        $ref: '#/components/messages/OrderPlaced'
+operations:
+  publishOrderPlaced:
+    action: send
+    summary: Публикует Сервис приёмки (через outbox БД приёмки)
+    channel:
+      $ref: '#/channels/orderPlaced'
+    messages:
+      - $ref: '#/channels/orderPlaced/messages/OrderPlaced'
+components:
+  messages:
+    OrderPlaced:
+      name: OrderPlaced
+      title: Заказ размещён
+      headers:
+        $ref: '#/components/schemas/Headers'
+      payload:
+        $ref: '#/components/schemas/OrderPlacedPayload'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: order_id
+      examples:
+        - name: example
+          headers:
+            correlation_id: 0d7f4b1e-21a3-4c3d-9a5e-11c0b2b7f001
+          payload:
+            event_id: 7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918
+            event_type: OrderPlaced
+            event_version: 1
+            occurred_at: '2026-10-21T10:15:00+03:00'
+            order_id: '4821-77'
+            point_id: MDM-0451
+            cell_id: B-14
+            storage_until: '2026-10-28'
+  schemas:
+    Headers:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+          description: Один на всю цепочку выдачи, для трассировки (Модуль 3)
+    OrderPlacedPayload:
+      type: object
+      required: [event_id, event_type, event_version, occurred_at, order_id, point_id, cell_id, storage_until]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Уникален для события. По нему потребитель отсекает дубли
+        event_type:
+          type: string
+          const: OrderPlaced
+        event_version:
+          type: integer
+          const: 1
+        occurred_at:
+          type: string
+          format: date-time
+          description: Время факта (не публикации). При офлайне — время на точке
+        order_id:
+          type: string
+          description: Ключ партиции, порядок событий одного заказа
+        point_id: { type: string, description: Код точки из Справочника точек (MDM) }
+        cell_id: { type: string }
+        storage_until: { type: string, format: date, description: До какого дня храним }
