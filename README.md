@@ -6,6 +6,10 @@
 ## Модуль №2
 [C1, C2 и ADR](./docs/05-c4-and-adr.md)
 
+## Модуль №3
+[DFD и Реестр угроз](./docs/security/threat-model.md)
+[Матрица доступа](./docs/security/access-and-audit.md)
+
 
 
 ## Команда и Роли 
