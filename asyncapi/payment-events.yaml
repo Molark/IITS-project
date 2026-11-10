@@ -1,0 +1,96 @@
+asyncapi: 3.0.0
+info:
+  title: События контекста «Оплата»
+  version: 1.0.0
+  description: |
+    Публикует Адаптер оплаты при каждом изменении статуса. Читают Выдача, Сверка и хранилище.
+    Событие отправляется через outbox и может прийти дважды: потребитель отсеивает повторы по event_id.
+    Ключ Kafka — order_id. Мажорная версия в адресе канала. ПДн в событие не кладём.
+defaultContentType: application/json
+servers:
+  kafka:
+    host: kafka.pvz.example.local:9092
+    protocol: kafka
+    description: Учебный кластер Kafka (ADR-003)
+channels:
+  paymentStatusChanged:
+    address: pvz.payment.payment-status-changed.v1
+    description: Статус платёжной операции изменился
+    messages:
+      PaymentStatusChanged:
+        $ref: '#/components/messages/PaymentStatusChanged'
+operations:
+  publishPaymentStatusChanged:
+    action: send
+    summary: Публикует Адаптер оплаты (через outbox БД оплаты)
+    channel:
+      $ref: '#/channels/paymentStatusChanged'
+    messages:
+      - $ref: '#/channels/paymentStatusChanged/messages/PaymentStatusChanged'
+components:
+  messages:
+    PaymentStatusChanged:
+      name: PaymentStatusChanged
+      title: Статус оплаты изменён
+      headers:
+        $ref: '#/components/schemas/Headers'
+      payload:
+        $ref: '#/components/schemas/PaymentStatusChangedPayload'
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: order_id
+      examples:
+        - name: example
+          headers:
+            correlation_id: 0d7f4b1e-21a3-4c3d-9a5e-11c0b2b7f001
+          payload:
+            event_id: 3c2b1a09-8e7d-4c6b-a5f4-e3d2c1b0a998
+            event_type: PaymentStatusChanged
+            event_version: 1
+            occurred_at: '2026-10-22T14:02:41+03:00'
+            order_id: '4821-77'
+            payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11
+            point_id: MDM-0451
+            status: paid
+            previous_status: unknown
+            amount_kopecks: 249000
+  schemas:
+    Headers:
+      type: object
+      properties:
+        correlation_id:
+          type: string
+          description: Один на всю цепочку выдачи, для трассировки (Модуль 3)
+    PaymentStatusChangedPayload:
+      type: object
+      required: [event_id, event_type, event_version, occurred_at, order_id, payment_id, point_id, status, amount_kopecks]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Уникален для события. По нему потребитель отсекает дубли
+        event_type:
+          type: string
+          const: PaymentStatusChanged
+        event_version:
+          type: integer
+          const: 1
+        occurred_at:
+          type: string
+          format: date-time
+          description: Время факта (не публикации). При офлайне — время на точке
+        order_id:
+          type: string
+          description: Ключ партиции, порядок событий одного заказа
+        payment_id: { type: string, format: uuid }
+        point_id: { type: string }
+        status:
+          type: string
+          description: Незнакомое значение потребитель обрабатывает как unknown
+          enum: [paid, declined, unknown, refund_pending, refunded]
+        previous_status:
+          type: string
+          enum: [paid, declined, unknown, refund_pending, refunded]
+        amount_kopecks: { type: integer, minimum: 1 }

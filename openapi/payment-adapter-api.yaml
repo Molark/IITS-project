@@ -1,0 +1,170 @@
+openapi: 3.0.3
+info:
+  title: API адаптера оплаты (Сервис выдачи → Адаптер оплаты)
+  version: 1.0.0
+  description: |
+    Адаптер оплаты переводит ответы банка в три статуса: paid, declined, unknown.
+    Idempotency-Key передаётся в банк, повтор не создаёт второе списание.
+    Таймаут к банку 1,5 с. Нет ответа — статус unknown, дальше адаптер узнаёт статус
+    по ID операции до 60 с. Изменения статуса публикуются событием PaymentStatusChanged.
+servers:
+  - url: https://payment-adapter.pvz.example.local/api
+    description: Учебный адрес (только внутренняя сеть)
+
+paths:
+  /v1/payments:
+    post:
+      operationId: createPayment
+      summary: Запросить оплату в банке
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentRequest' }
+            example:
+              order_id: '4821-77'
+              amount_kopecks: 249000
+              point_id: MDM-0451
+              terminal_id: T-0451-1
+      responses:
+        '201':
+          description: Банк ответил вовремя — оплачено или отказ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+              example:
+                payment_id: 6f1c2a52-6a0e-4d7b-9d0e-4c8a6f3b1e11
+                order_id: '4821-77'
+                amount_kopecks: 249000
+                status: paid
+                bank_operation_id: SBR-883120
+                updated_at: '2026-10-22T14:02:41+03:00'
+        '202':
+          description: Банк не ответил за 1,5 с — статус `unknown`, адаптер продолжает узнавать статус
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '200':
+          description: Повтор с тем же ключом — возвращена уже существующая операция
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '409':
+          description: Ключ уже использован с другим телом, или у заказа есть оплата `unknown` (FR-05)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Неверные данные (сумма ≤ 0, неизвестная точка)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Банк недоступен совсем (circuit breaker открыт — Модуль 3). Списания не было.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/payments/{paymentId}:
+    get:
+      operationId: getPayment
+      summary: Статус оплаты по ID (без нового списания)
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Текущий статус
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '404':
+          description: Нет такой операции
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/payments/{paymentId}/refunds:
+    post:
+      operationId: refundPayment
+      summary: Вернуть платёж (компенсация шага саги)
+      description: |
+        Компенсация шага «Списание»: если после оплаты заказ не выдан
+        (получатель отказался, товар повреждён). Возврат — новое действие,
+        а не отмена: он тоже попадает в журнал и в событие.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, enum: [recipient_refused, goods_damaged, issued_cancelled_by_lead] }
+      responses:
+        '202':
+          description: Возврат принят, статус придёт событием `PaymentStatusChanged` (refunded)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+        '409':
+          description: Платёж не в статусе `paid` или заказ уже выдан (после точки невозврата возврат только процессом «возврат товара»)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    PaymentRequest:
+      type: object
+      required: [order_id, amount_kopecks, point_id, terminal_id]
+      properties:
+        order_id: { type: string }
+        amount_kopecks: { type: integer, minimum: 1, description: Сумма в копейках }
+        point_id: { type: string }
+        terminal_id: { type: string }
+
+    Payment:
+      type: object
+      required: [payment_id, order_id, amount_kopecks, status, updated_at]
+      properties:
+        payment_id: { type: string, format: uuid }
+        order_id: { type: string }
+        amount_kopecks: { type: integer }
+        status:
+          type: string
+          description: |
+            `paid / declined / unknown` — исходы оплаты; `refund_pending / refunded` —
+            после компенсации. Незнакомое значение потребитель считает `unknown`.
+          enum: [paid, declined, unknown, refund_pending, refunded]
+        bank_operation_id: { type: string, description: "ID операции в банке, для запроса статуса" }
+        updated_at: { type: string, format: date-time }
+
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum: [VALIDATION_ERROR, NOT_FOUND, IDEMPOTENCY_KEY_REUSED, PAYMENT_UNKNOWN, NOT_REFUNDABLE, BANK_UNAVAILABLE]
+        detail: { type: string }
+        correlation_id: { type: string }
