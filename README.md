@@ -1,4 +1,3 @@
-
 # IITS-project
 
 ## Модуль №1
@@ -10,6 +9,7 @@
 ## Модуль №3
 [DFD и Реестр угроз](./docs/security/threat-model.md)
 [Матрица доступа](./docs/security/access-and-audit.md)
+[Стратегия качества](./docs/quality/quality-strategy.md), [каталог E2E](./docs/quality/e2e-catalog.md), [тестовые данные](./docs/quality/test-data.md)
 
 
 
